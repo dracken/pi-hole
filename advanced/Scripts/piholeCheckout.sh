@@ -3,13 +3,13 @@
 # (c) 2017 Pi-hole, LLC (https://pi-hole.net)
 # Network-wide ad blocking via your own hardware.
 #
-# Switch Pi-hole subsystems to a different Github branch.
+# Switch Pi-hole subsystems to a different GitHub branch.
 #
 # This file is copyright under the latest version of the EUPL.
 # Please see LICENSE file for your rights under this license.
 
 readonly PI_HOLE_FILES_DIR="/etc/.pihole"
-PH_TEST="true"
+SKIP_INSTALL="true"
 source "${PI_HOLE_FILES_DIR}/automated install/basic-install.sh"
 
 # webInterfaceGitUrl set in basic-install.sh
@@ -36,7 +36,7 @@ warning1() {
             return 0
             ;;
         *)
-            echo -e "\\n  ${INFO} Branch change has been cancelled"
+            echo -e "\\n  ${INFO} Branch change has been canceled"
             return 1
             ;;
     esac
@@ -45,6 +45,12 @@ warning1() {
 checkout() {
     local corebranches
     local webbranches
+
+    # Check if FTL is installed - do this early on as FTL is a hard dependency for Pi-hole
+    local funcOutput
+    funcOutput=$(get_binary_name) #Store output of get_binary_name here
+    local binary
+    binary="pihole-FTL${funcOutput##*pihole-FTL}" #binary name will be the last line of the output of get_binary_name (it always begins with pihole-FTL)
 
     # Avoid globbing
     set -f
@@ -78,7 +84,7 @@ checkout() {
         echo -e "  ${INFO} Shortcut \"dev\" detected - checking out development / devel branches..."
         echo ""
         echo -e "  ${INFO} Pi-hole Core"
-        fetch_checkout_pull_branch "${PI_HOLE_FILES_DIR}" "development" || { echo "  ${CROSS} Unable to pull Core developement branch"; exit 1; }
+        fetch_checkout_pull_branch "${PI_HOLE_FILES_DIR}" "development" || { echo "  ${CROSS} Unable to pull Core development branch"; exit 1; }
         if [[ "${INSTALL_WEB_INTERFACE}" == "true" ]]; then
             echo ""
             echo -e "  ${INFO} Web interface"
@@ -86,10 +92,10 @@ checkout() {
         fi
         #echo -e "  ${TICK} Pi-hole Core"
 
-        get_binary_name
         local path
         path="development/${binary}"
         echo "development" > /etc/pihole/ftlbranch
+        chmod 644 /etc/pihole/ftlbranch
     elif [[ "${1}" == "master" ]] ; then
         # Shortcut to check out master branches
         echo -e "  ${INFO} Shortcut \"master\" detected - checking out master branches..."
@@ -100,10 +106,10 @@ checkout() {
             fetch_checkout_pull_branch "${webInterfaceDir}" "master" || { echo "  ${CROSS} Unable to pull Web master branch"; exit 1; }
         fi
         #echo -e "  ${TICK} Web Interface"
-        get_binary_name
         local path
         path="master/${binary}"
         echo "master" > /etc/pihole/ftlbranch
+        chmod 644 /etc/pihole/ftlbranch
     elif [[ "${1}" == "core" ]] ; then
         str="Fetching branches from ${piholeGitUrl}"
         echo -ne "  ${INFO} $str"
@@ -115,7 +121,7 @@ checkout() {
 
         if [[ "${corebranches[*]}" == *"master"* ]]; then
             echo -e "${OVER}  ${TICK} $str"
-            echo -e "${INFO} ${#corebranches[@]} branches available for Pi-hole Core"
+            echo -e "  ${INFO} ${#corebranches[@]} branches available for Pi-hole Core"
         else
             # Print STDERR output from get_available_branches
             echo -e "${OVER}  ${CROSS} $str\\n\\n${corebranches[*]}"
@@ -142,7 +148,7 @@ checkout() {
 
         if [[ "${webbranches[*]}" == *"master"* ]]; then
             echo -e "${OVER}  ${TICK} $str"
-            echo -e "${INFO} ${#webbranches[@]} branches available for Web Admin"
+            echo -e "  ${INFO} ${#webbranches[@]} branches available for Web Admin"
         else
             # Print STDERR output from get_available_branches
             echo -e "${OVER}  ${CROSS} $str\\n\\n${webbranches[*]}"
@@ -158,17 +164,24 @@ checkout() {
             exit 1
         fi
         checkout_pull_branch "${webInterfaceDir}" "${2}"
+        # Update local and remote versions via updatechecker
+        /opt/pihole/updatecheck.sh
     elif [[ "${1}" == "ftl" ]] ; then
-        get_binary_name
         local path
+        local oldbranch
         path="${2}/${binary}"
+        oldbranch="$(pihole-FTL -b)"
 
         if check_download_exists "$path"; then
             echo "  ${TICK} Branch ${2} exists"
             echo "${2}" > /etc/pihole/ftlbranch
+            chmod 644 /etc/pihole/ftlbranch
+            echo -e "  ${INFO} Switching to branch: \"${2}\" from \"${oldbranch}\""
             FTLinstall "${binary}"
             restart_service pihole-FTL
             enable_service pihole-FTL
+            # Update local and remote versions via updatechecker
+            /opt/pihole/updatecheck.sh
         else
             echo "  ${CROSS} Requested branch \"${2}\" is not available"
             ftlbranches=( $(git ls-remote https://github.com/pi-hole/ftl | grep 'heads' | sed 's/refs\/heads\///;s/ //g' | awk '{print $2}') )

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1090
+# shellcheck disable=SC2154
+
 
 # Pi-hole: A black hole for Internet advertisements
 # (c) 2017 Pi-hole, LLC (https://pi-hole.net)
@@ -10,12 +12,26 @@
 # This file is copyright under the latest version of the EUPL.
 # Please see LICENSE file for your rights under this license.
 
-readonly setupVars="/etc/pihole/setupVars.conf"
 readonly dnsmasqconfig="/etc/dnsmasq.d/01-pihole.conf"
 readonly dhcpconfig="/etc/dnsmasq.d/02-pihole-dhcp.conf"
 readonly FTLconf="/etc/pihole/pihole-FTL.conf"
 # 03 -> wildcards
 readonly dhcpstaticconfig="/etc/dnsmasq.d/04-pihole-static-dhcp.conf"
+readonly dnscustomfile="/etc/pihole/custom.list"
+readonly dnscustomcnamefile="/etc/dnsmasq.d/05-pihole-custom-cname.conf"
+
+readonly gravityDBfile="/etc/pihole/gravity.db"
+
+
+readonly setupVars="/etc/pihole/setupVars.conf"
+readonly PI_HOLE_BIN_DIR="/usr/local/bin"
+
+# Root of the web server
+readonly webroot="/var/www/html"
+
+# Source utils script
+utilsfile="/opt/pihole/utils.sh"
+source "${utilsfile}"
 
 coltable="/opt/pihole/COL_TABLE"
 if [[ -f ${coltable} ]]; then
@@ -28,66 +44,101 @@ Example: pihole -a -p password
 Set options for the Admin Console
 
 Options:
-  -p, password        Set Admin Console password
-  -c, celsius         Set Celsius as preferred temperature unit
-  -f, fahrenheit      Set Fahrenheit as preferred temperature unit
-  -k, kelvin          Set Kelvin as preferred temperature unit
-  -r, hostrecord      Add a name to the DNS associated to an IPv4/IPv6 address
-  -e, email           Set an administrative contact address for the Block Page
-  -h, --help          Show this help dialog
-  -i, interface       Specify dnsmasq's interface listening behavior
-  -l, privacylevel    Set privacy level (0 = lowest, 4 = highest)"
+  -p, password                    Set Admin Console password
+  -c, celsius                     Set Celsius as preferred temperature unit
+  -f, fahrenheit                  Set Fahrenheit as preferred temperature unit
+  -k, kelvin                      Set Kelvin as preferred temperature unit
+  -h, --help                      Show this help dialog
+  -i, interface                   Specify dnsmasq's interface listening behavior
+  -l, privacylevel                Set privacy level (0 = lowest, 3 = highest)
+  -t, teleporter                  Backup configuration as an archive
+  -t, teleporter myname.tar.gz    Backup configuration to archive with name myname.tar.gz as specified"
     exit 0
 }
 
 add_setting() {
-    echo "${1}=${2}" >> "${setupVars}"
+    addOrEditKeyValPair "${setupVars}" "${1}" "${2}"
 }
 
 delete_setting() {
-    sed -i "/${1}/d" "${setupVars}"
+    removeKey "${setupVars}" "${1}"
 }
 
 change_setting() {
-    delete_setting "${1}"
-    add_setting "${1}" "${2}"
+    addOrEditKeyValPair "${setupVars}" "${1}" "${2}"
 }
 
 addFTLsetting() {
-    echo "${1}=${2}" >> "${FTLconf}"
+    addOrEditKeyValPair "${FTLconf}" "${1}" "${2}"
 }
 
 deleteFTLsetting() {
-    sed -i "/${1}/d" "${FTLconf}"
+    removeKey "${FTLconf}" "${1}"
 }
 
 changeFTLsetting() {
-    deleteFTLsetting "${1}"
-    addFTLsetting "${1}" "${2}"
+    addOrEditKeyValPair "${FTLconf}" "${1}" "${2}"
 }
 
 add_dnsmasq_setting() {
-    if [[ "${2}" != "" ]]; then
-        echo "${1}=${2}" >> "${dnsmasqconfig}"
-    else
-        echo "${1}" >> "${dnsmasqconfig}"
-    fi
+    addOrEditKeyValPair "${dnsmasqconfig}" "${1}" "${2}"
 }
 
 delete_dnsmasq_setting() {
-    sed -i "/${1}/d" "${dnsmasqconfig}"
+    removeKey "${dnsmasqconfig}" "${1}"
 }
 
 SetTemperatureUnit() {
-    change_setting "TEMPERATUREUNIT" "${unit}"
+    addOrEditKeyValPair "${setupVars}" "TEMPERATUREUNIT" "${unit}"
     echo -e "  ${TICK} Set temperature unit to ${unit}"
 }
 
 HashPassword() {
     # Compute password hash twice to avoid rainbow table vulnerability
-    return=$(echo -n ${1} | sha256sum | sed 's/\s.*$//')
-    return=$(echo -n ${return} | sha256sum | sed 's/\s.*$//')
-    echo ${return}
+    return=$(echo -n "${1}" | sha256sum | sed 's/\s.*$//')
+    return=$(echo -n "${return}" | sha256sum | sed 's/\s.*$//')
+    echo "${return}"
+}
+
+# Check an IP address to see if it is a valid one
+valid_ip() {
+    # Local, named variables
+    local ip=${1}
+    local stat=1
+
+    # Regex matching one IPv4 component, i.e. an integer from 0 to 255.
+    # See https://tools.ietf.org/html/rfc1340
+    local ipv4elem="(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)";
+    # Regex matching an optional port (starting with '#') range of 1-65536
+    local portelem="(#(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0))?";
+    # Build a full IPv4 regex from the above subexpressions
+    local regex="^${ipv4elem}\\.${ipv4elem}\\.${ipv4elem}\\.${ipv4elem}${portelem}$"
+
+    # Evaluate the regex, and return the result
+    [[ $ip =~ ${regex} ]]
+
+    stat=$?
+    return "${stat}"
+}
+
+valid_ip6() {
+    local ip=${1}
+    local stat=1
+
+    # Regex matching one IPv6 element, i.e. a hex value from 0000 to FFFF
+    local ipv6elem="[0-9a-fA-F]{1,4}"
+    # Regex matching an IPv6 CIDR, i.e. 1 to 128
+    local v6cidr="(\\/([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])){0,1}"
+    # Regex matching an optional port (starting with '#') range of 1-65536
+    local portelem="(#(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0))?";
+    # Build a full IPv6 regex from the above subexpressions
+    local regex="^(((${ipv6elem}))*((:${ipv6elem}))*::((${ipv6elem}))*((:${ipv6elem}))*|((${ipv6elem}))((:${ipv6elem})){7})${v6cidr}${portelem}$"
+
+    # Evaluate the regex, and return the result
+    [[ ${ip} =~ ${regex} ]]
+
+    stat=$?
+    return "${stat}"
 }
 
 SetWebPassword() {
@@ -113,21 +164,21 @@ SetWebPassword() {
         read -s -r -p "Enter New Password (Blank for no password): " PASSWORD
         echo ""
 
-    if [ "${PASSWORD}" == "" ]; then
-        change_setting "WEBPASSWORD" ""
-        echo -e "  ${TICK} Password Removed"
-        exit 0
-    fi
+        if [ "${PASSWORD}" == "" ]; then
+            addOrEditKeyValPair "${setupVars}" "WEBPASSWORD" ""
+            echo -e "  ${TICK} Password Removed"
+            exit 0
+        fi
 
-    read -s -r -p "Confirm Password: " CONFIRM
-    echo ""
+        read -s -r -p "Confirm Password: " CONFIRM
+        echo ""
     fi
 
     if [ "${PASSWORD}" == "${CONFIRM}" ] ; then
         # We do not wrap this in brackets, otherwise BASH will expand any appropriate syntax
         hash=$(HashPassword "$PASSWORD")
         # Save hash to file
-        change_setting "WEBPASSWORD" "${hash}"
+        addOrEditKeyValPair "${setupVars}" "WEBPASSWORD" "${hash}"
         echo -e "  ${TICK} New password set"
     else
         echo -e "  ${CROSS} Passwords don't match. Your password has not been changed"
@@ -138,117 +189,202 @@ SetWebPassword() {
 ProcessDNSSettings() {
     source "${setupVars}"
 
-    delete_dnsmasq_setting "server"
+    removeKey "${dnsmasqconfig}" "server"
 
     COUNTER=1
-    while [[ 1 ]]; do
+    while true ; do
         var=PIHOLE_DNS_${COUNTER}
         if [ -z "${!var}" ]; then
             break;
         fi
-        add_dnsmasq_setting "server" "${!var}"
-        let COUNTER=COUNTER+1
+        addKey "${dnsmasqconfig}" "server=${!var}"
+        (( COUNTER++ ))
     done
 
     # The option LOCAL_DNS_PORT is deprecated
     # We apply it once more, and then convert it into the current format
-    if [ ! -z "${LOCAL_DNS_PORT}" ]; then
-        add_dnsmasq_setting "server" "127.0.0.1#${LOCAL_DNS_PORT}"
-        add_setting "PIHOLE_DNS_${COUNTER}" "127.0.0.1#${LOCAL_DNS_PORT}"
-        delete_setting "LOCAL_DNS_PORT"
+    if [ -n "${LOCAL_DNS_PORT}" ]; then
+        addOrEditKeyValPair "${dnsmasqconfig}" "server" "127.0.0.1#${LOCAL_DNS_PORT}"
+        addOrEditKeyValPair "${setupVars}" "PIHOLE_DNS_${COUNTER}" "127.0.0.1#${LOCAL_DNS_PORT}"
+        removeKey "${setupVars}" "LOCAL_DNS_PORT"
     fi
 
-    delete_dnsmasq_setting "domain-needed"
+    removeKey "${dnsmasqconfig}" "domain-needed"
+    removeKey "${dnsmasqconfig}" "expand-hosts"
 
     if [[ "${DNS_FQDN_REQUIRED}" == true ]]; then
-        add_dnsmasq_setting "domain-needed"
+        addKey "${dnsmasqconfig}" "domain-needed"
+        addKey "${dnsmasqconfig}" "expand-hosts"
     fi
 
-    delete_dnsmasq_setting "bogus-priv"
+    removeKey "${dnsmasqconfig}" "bogus-priv"
 
     if [[ "${DNS_BOGUS_PRIV}" == true ]]; then
-        add_dnsmasq_setting "bogus-priv"
+        addKey "${dnsmasqconfig}" "bogus-priv"
     fi
 
-    delete_dnsmasq_setting "dnssec"
-    delete_dnsmasq_setting "trust-anchor="
+    removeKey "${dnsmasqconfig}" "dnssec"
+    removeKey "${dnsmasqconfig}" "trust-anchor"
 
     if [[ "${DNSSEC}" == true ]]; then
         echo "dnssec
-trust-anchor=.,19036,8,2,49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5
 trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
 " >> "${dnsmasqconfig}"
     fi
 
-    delete_dnsmasq_setting "host-record"
+    removeKey "${dnsmasqconfig}" "host-record"
 
-    if [ ! -z "${HOSTRECORD}" ]; then
-        add_dnsmasq_setting "host-record" "${HOSTRECORD}"
+    if [ -n "${HOSTRECORD}" ]; then
+        addOrEditKeyValPair "${dnsmasqconfig}" "host-record" "${HOSTRECORD}"
     fi
 
     # Setup interface listening behavior of dnsmasq
-    delete_dnsmasq_setting "interface"
-    delete_dnsmasq_setting "local-service"
+    removeKey "${dnsmasqconfig}" "interface"
+    removeKey "${dnsmasqconfig}" "local-service"
+    removeKey "${dnsmasqconfig}" "except-interface"
+    removeKey "${dnsmasqconfig}" "bind-interfaces"
 
     if [[ "${DNSMASQ_LISTENING}" == "all" ]]; then
         # Listen on all interfaces, permit all origins
-        add_dnsmasq_setting "except-interface" "nonexisting"
+        addOrEditKeyValPair "${dnsmasqconfig}" "except-interface" "nonexisting"
     elif [[ "${DNSMASQ_LISTENING}" == "local" ]]; then
         # Listen only on all interfaces, but only local subnets
-        add_dnsmasq_setting "local-service"
+        addKey "${dnsmasqconfig}" "local-service"
     else
+        # Options "bind" and "single"
         # Listen only on one interface
         # Use eth0 as fallback interface if interface is missing in setupVars.conf
         if [ -z "${PIHOLE_INTERFACE}" ]; then
             PIHOLE_INTERFACE="eth0"
         fi
 
-        add_dnsmasq_setting "interface" "${PIHOLE_INTERFACE}"
+        addOrEditKeyValPair "${dnsmasqconfig}" "interface" "${PIHOLE_INTERFACE}"
+
+        if [[ "${DNSMASQ_LISTENING}" == "bind" ]]; then
+            # Really bind to interface
+            addKey "${dnsmasqconfig}" "bind-interfaces"
+        fi
     fi
 
     if [[ "${CONDITIONAL_FORWARDING}" == true ]]; then
-        add_dnsmasq_setting "server=/${CONDITIONAL_FORWARDING_DOMAIN}/${CONDITIONAL_FORWARDING_IP}"
-        add_dnsmasq_setting "server=/${CONDITIONAL_FORWARDING_REVERSE}/${CONDITIONAL_FORWARDING_IP}"
+        # Convert legacy "conditional forwarding" to rev-server configuration
+        # Remove any existing REV_SERVER settings
+        removeKey "${setupVars}" "REV_SERVER"
+        removeKey "${setupVars}" "REV_SERVER_DOMAIN"
+        removeKey "${setupVars}" "REV_SERVER_TARGET"
+        removeKey "${setupVars}" "REV_SERVER_CIDR"
+
+        REV_SERVER=true
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER" "true"
+
+        REV_SERVER_DOMAIN="${CONDITIONAL_FORWARDING_DOMAIN}"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_DOMAIN" "${REV_SERVER_DOMAIN}"
+
+        REV_SERVER_TARGET="${CONDITIONAL_FORWARDING_IP}"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_TARGET" "${REV_SERVER_TARGET}"
+
+        #Convert CONDITIONAL_FORWARDING_REVERSE if necessary e.g:
+        #          1.1.168.192.in-addr.arpa to 192.168.1.1/32
+        #          1.168.192.in-addr.arpa to 192.168.1.0/24
+        #          168.192.in-addr.arpa to 192.168.0.0/16
+        #          192.in-addr.arpa to 192.0.0.0/8
+        if [[ "${CONDITIONAL_FORWARDING_REVERSE}" == *"in-addr.arpa" ]];then
+            arrRev=("${CONDITIONAL_FORWARDING_REVERSE//./ }")
+            case ${#arrRev[@]} in
+                6   )   REV_SERVER_CIDR="${arrRev[3]}.${arrRev[2]}.${arrRev[1]}.${arrRev[0]}/32";;
+                5   )   REV_SERVER_CIDR="${arrRev[2]}.${arrRev[1]}.${arrRev[0]}.0/24";;
+                4   )   REV_SERVER_CIDR="${arrRev[1]}.${arrRev[0]}.0.0/16";;
+                3   )   REV_SERVER_CIDR="${arrRev[0]}.0.0.0/8";;
+            esac
+        else
+            # Set REV_SERVER_CIDR to whatever value it was set to
+            REV_SERVER_CIDR="${CONDITIONAL_FORWARDING_REVERSE}"
+        fi
+
+        # If REV_SERVER_CIDR is not converted by the above, then use the REV_SERVER_TARGET variable to derive it
+        if [ -z "${REV_SERVER_CIDR}" ]; then
+            # Convert existing input to /24 subnet (preserves legacy behavior)
+            # This sed converts "192.168.1.2" to "192.168.1.0/24"
+            # shellcheck disable=2001
+            REV_SERVER_CIDR="$(sed "s+\\.[0-9]*$+\\.0/24+" <<< "${REV_SERVER_TARGET}")"
+        fi
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_CIDR" "${REV_SERVER_CIDR}"
+
+        # Remove obsolete settings from setupVars.conf
+        removeKey "${setupVars}" "CONDITIONAL_FORWARDING"
+        removeKey "${setupVars}" "CONDITIONAL_FORWARDING_REVERSE"
+        removeKey "${setupVars}" "CONDITIONAL_FORWARDING_DOMAIN"
+        removeKey "${setupVars}" "CONDITIONAL_FORWARDING_IP"
     fi
+
+    removeKey "${dnsmasqconfig}" "rev-server"
+
+    if [[ "${REV_SERVER}" == true ]]; then
+        addKey "${dnsmasqconfig}" "rev-server=${REV_SERVER_CIDR},${REV_SERVER_TARGET}"
+        if [ -n "${REV_SERVER_DOMAIN}" ]; then
+            # Forward local domain names to the CF target, too
+            addKey "${dnsmasqconfig}" "server=/${REV_SERVER_DOMAIN}/${REV_SERVER_TARGET}"
+        fi
+
+        if [[ "${DNS_FQDN_REQUIRED}" != true ]]; then
+            # Forward unqualified names to the CF target only when the "never
+            # forward non-FQDN" option is unticked
+            addKey "${dnsmasqconfig}" "server=//${REV_SERVER_TARGET}"
+        fi
+
+    fi
+
+    # We need to process DHCP settings here as well to account for possible
+    # changes in the non-FQDN forwarding. This cannot be done in 01-pihole.conf
+    # as we don't want to delete all local=/.../ lines so it's much safer to
+    # simply rewrite the entire corresponding config file (which is what the
+    # DHCP settings subroutine is doing)
+    ProcessDHCPSettings
 }
 
 SetDNSServers() {
     # Save setting to file
-    delete_setting "PIHOLE_DNS"
+    removeKey "${setupVars}" "PIHOLE_DNS"
     IFS=',' read -r -a array <<< "${args[2]}"
     for index in "${!array[@]}"
     do
-        add_setting "PIHOLE_DNS_$((index+1))" "${array[index]}"
+        # Replace possible "\#" by "#". This fixes web#1427
+        local ip
+        ip="${array[index]//\\#/#}"
+
+        if valid_ip "${ip}" || valid_ip6 "${ip}" ; then
+            addOrEditKeyValPair "${setupVars}" "PIHOLE_DNS_$((index+1))" "${ip}"
+        else
+            echo -e "  ${CROSS} Invalid IP has been passed"
+            exit 1
+        fi
     done
 
     if [[ "${args[3]}" == "domain-needed" ]]; then
-        change_setting "DNS_FQDN_REQUIRED" "true"
+        addOrEditKeyValPair "${setupVars}" "DNS_FQDN_REQUIRED" "true"
     else
-        change_setting "DNS_FQDN_REQUIRED" "false"
+        addOrEditKeyValPair "${setupVars}" "DNS_FQDN_REQUIRED" "false"
     fi
 
     if [[ "${args[4]}" == "bogus-priv" ]]; then
-        change_setting "DNS_BOGUS_PRIV" "true"
+        addOrEditKeyValPair "${setupVars}" "DNS_BOGUS_PRIV" "true"
     else
-        change_setting "DNS_BOGUS_PRIV" "false"
+        addOrEditKeyValPair "${setupVars}" "DNS_BOGUS_PRIV" "false"
     fi
 
     if [[ "${args[5]}" == "dnssec" ]]; then
-        change_setting "DNSSEC" "true"
+        addOrEditKeyValPair "${setupVars}" "DNSSEC" "true"
     else
-        change_setting "DNSSEC" "false"
+        addOrEditKeyValPair "${setupVars}" "DNSSEC" "false"
     fi
 
-    if [[ "${args[6]}" == "conditional_forwarding" ]]; then
-        change_setting "CONDITIONAL_FORWARDING" "true"
-        change_setting "CONDITIONAL_FORWARDING_IP" "${args[7]}"
-        change_setting "CONDITIONAL_FORWARDING_DOMAIN" "${args[8]}"
-        change_setting "CONDITIONAL_FORWARDING_REVERSE" "${args[9]}"
+    if [[ "${args[6]}" == "rev-server" ]]; then
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER" "true"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_CIDR" "${args[7]}"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_TARGET" "${args[8]}"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER_DOMAIN" "${args[9]}"
     else
-        change_setting "CONDITIONAL_FORWARDING" "false"
-        delete_setting "CONDITIONAL_FORWARDING_IP"
-        delete_setting "CONDITIONAL_FORWARDING_DOMAIN"
-        delete_setting "CONDITIONAL_FORWARDING_REVERSE"
+        addOrEditKeyValPair "${setupVars}" "REV_SERVER" "false"
     fi
 
     ProcessDNSSettings
@@ -258,11 +394,11 @@ SetDNSServers() {
 }
 
 SetExcludeDomains() {
-    change_setting "API_EXCLUDE_DOMAINS" "${args[2]}"
+    addOrEditKeyValPair "${setupVars}" "API_EXCLUDE_DOMAINS" "${args[2]}"
 }
 
 SetExcludeClients() {
-    change_setting "API_EXCLUDE_CLIENTS" "${args[2]}"
+    addOrEditKeyValPair "${setupVars}" "API_EXCLUDE_CLIENTS" "${args[2]}"
 }
 
 Poweroff(){
@@ -274,45 +410,40 @@ Reboot() {
 }
 
 RestartDNS() {
-    /usr/local/bin/pihole restartdns
+    "${PI_HOLE_BIN_DIR}"/pihole restartdns
 }
 
 SetQueryLogOptions() {
-    change_setting "API_QUERY_LOG_SHOW" "${args[2]}"
+    addOrEditKeyValPair "${setupVars}" "API_QUERY_LOG_SHOW" "${args[2]}"
 }
 
 ProcessDHCPSettings() {
     source "${setupVars}"
 
     if [[ "${DHCP_ACTIVE}" == "true" ]]; then
-    interface="${PIHOLE_INTERFACE}"
+        interface="${PIHOLE_INTERFACE}"
 
-    # Use eth0 as fallback interface
-    if [ -z ${interface} ]; then
-        interface="eth0"
-    fi
+        # Use eth0 as fallback interface
+        if [ -z ${interface} ]; then
+            interface="eth0"
+        fi
 
-    if [[ "${PIHOLE_DOMAIN}" == "" ]]; then
-        PIHOLE_DOMAIN="lan"
-        change_setting "PIHOLE_DOMAIN" "${PIHOLE_DOMAIN}"
-    fi
+        if [[ "${PIHOLE_DOMAIN}" == "" ]]; then
+            PIHOLE_DOMAIN="lan"
+            addOrEditKeyValPair "${setupVars}" "PIHOLE_DOMAIN" "${PIHOLE_DOMAIN}"
+        fi
 
-    if [[ "${DHCP_LEASETIME}" == "0" ]]; then
-        leasetime="infinite"
-    elif [[ "${DHCP_LEASETIME}" == "" ]]; then
-        leasetime="24"
-        change_setting "DHCP_LEASETIME" "${leasetime}"
-    elif [[ "${DHCP_LEASETIME}" == "24h" ]]; then
-        #Installation is affected by known bug, introduced in a previous version.
-        #This will automatically clean up setupVars.conf and remove the unnecessary "h"
-        leasetime="24"
-        change_setting "DHCP_LEASETIME" "${leasetime}"
-    else
-        leasetime="${DHCP_LEASETIME}h"
-    fi
+        if [[ "${DHCP_LEASETIME}" == "0" ]]; then
+            leasetime="infinite"
+        elif [[ "${DHCP_LEASETIME}" == "" ]]; then
+            leasetime="24h"
+            addOrEditKeyValPair "${setupVars}" "DHCP_LEASETIME" "24"
+        else
+            leasetime="${DHCP_LEASETIME}h"
+        fi
 
-    # Write settings to file
-    echo "###############################################################################
+        # Write settings to file
+        echo "###############################################################################
 #  DHCP SERVER CONFIG FILE AUTOMATICALLY POPULATED BY PI-HOLE WEB INTERFACE.  #
 #            ANY CHANGES MADE TO THIS FILE WILL BE LOST ON CHANGE             #
 ###############################################################################
@@ -322,25 +453,34 @@ dhcp-option=option:router,${DHCP_ROUTER}
 dhcp-leasefile=/etc/pihole/dhcp.leases
 #quiet-dhcp
 " > "${dhcpconfig}"
+        chmod 644 "${dhcpconfig}"
 
-    if [[ "${PIHOLE_DOMAIN}" != "none" ]]; then
-        echo "domain=${PIHOLE_DOMAIN}" >> "${dhcpconfig}"
-    fi
+        if [[ "${PIHOLE_DOMAIN}" != "none" ]]; then
+            echo "domain=${PIHOLE_DOMAIN}" >> "${dhcpconfig}"
 
-    # Sourced from setupVars
-    # shellcheck disable=SC2154
-    if [[ "${DHCP_rapid_commit}" == "true" ]]; then
-        echo "dhcp-rapid-commit" >> "${dhcpconfig}"
-    fi
+            # When there is a Pi-hole domain set and "Never forward non-FQDNs" is
+            # ticked, we add `local=/domain/` to tell FTL that this domain is purely
+            # local and FTL may answer queries from /etc/hosts or DHCP but should
+            # never forward queries on that domain to any upstream servers
+            if  [[ "${DNS_FQDN_REQUIRED}" == true ]]; then
+                echo "local=/${PIHOLE_DOMAIN}/" >> "${dhcpconfig}"
+            fi
+        fi
 
-    if [[ "${DHCP_IPv6}" == "true" ]]; then
-        echo "#quiet-dhcp6
+        # Sourced from setupVars
+        # shellcheck disable=SC2154
+        if [[ "${DHCP_rapid_commit}" == "true" ]]; then
+            echo "dhcp-rapid-commit" >> "${dhcpconfig}"
+        fi
+
+        if [[ "${DHCP_IPv6}" == "true" ]]; then
+            echo "#quiet-dhcp6
 #enable-ra
 dhcp-option=option6:dns-server,[::]
-dhcp-range=::100,::1ff,constructor:${interface},ra-names,slaac,${leasetime}
-ra-param=*,0,0
+dhcp-range=::,constructor:${interface},ra-names,ra-stateless,64
+
 " >> "${dhcpconfig}"
-    fi
+        fi
 
     else
         if [[ -f "${dhcpconfig}" ]]; then
@@ -350,18 +490,26 @@ ra-param=*,0,0
 }
 
 EnableDHCP() {
-    change_setting "DHCP_ACTIVE" "true"
-    change_setting "DHCP_START" "${args[2]}"
-    change_setting "DHCP_END" "${args[3]}"
-    change_setting "DHCP_ROUTER" "${args[4]}"
-    change_setting "DHCP_LEASETIME" "${args[5]}"
-    change_setting "PIHOLE_DOMAIN" "${args[6]}"
-    change_setting "DHCP_IPv6" "${args[7]}"
-    change_setting "DHCP_rapid_commit" "${args[8]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_ACTIVE" "true"
+    addOrEditKeyValPair "${setupVars}" "DHCP_START" "${args[2]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_END" "${args[3]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_ROUTER" "${args[4]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_LEASETIME" "${args[5]}"
+    addOrEditKeyValPair "${setupVars}" "PIHOLE_DOMAIN" "${args[6]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_IPv6" "${args[7]}"
+    addOrEditKeyValPair "${setupVars}" "DHCP_rapid_commit" "${args[8]}"
 
     # Remove possible old setting from file
-    delete_dnsmasq_setting "dhcp-"
-    delete_dnsmasq_setting "quiet-dhcp"
+    removeKey "${dnsmasqconfig}" "dhcp-"
+    removeKey "${dnsmasqconfig}" "quiet-dhcp"
+
+    # If a DHCP client claims that its name is "wpad", ignore that.
+    # This fixes a security hole. see CERT Vulnerability VU#598349
+    # We also ignore "localhost" as Windows behaves strangely if a
+    # device claims this host name
+    addKey "${dnsmasqconfig}" "dhcp-name-match=set:hostname-ignore,wpad
+dhcp-name-match=set:hostname-ignore,localhost
+dhcp-ignore-names=tag:hostname-ignore"
 
     ProcessDHCPSettings
 
@@ -369,11 +517,11 @@ EnableDHCP() {
 }
 
 DisableDHCP() {
-    change_setting "DHCP_ACTIVE" "false"
+    addOrEditKeyValPair "${setupVars}" "DHCP_ACTIVE" "false"
 
     # Remove possible old setting from file
-    delete_dnsmasq_setting "dhcp-"
-    delete_dnsmasq_setting "quiet-dhcp"
+    removeKey "${dnsmasqconfig}" "dhcp-"
+    removeKey "${dnsmasqconfig}" "quiet-dhcp"
 
     ProcessDHCPSettings
 
@@ -381,45 +529,51 @@ DisableDHCP() {
 }
 
 SetWebUILayout() {
-    change_setting "WEBUIBOXEDLAYOUT" "${args[2]}"
+    addOrEditKeyValPair "${setupVars}" "WEBUIBOXEDLAYOUT" "${args[2]}"
+}
+
+SetWebUITheme() {
+    addOrEditKeyValPair "${setupVars}" "WEBTHEME" "${args[2]}"
+}
+
+CheckUrl(){
+    local regex check_url
+    # Check for characters NOT allowed in URLs
+    regex="[^a-zA-Z0-9:/?&%=~._()-;]"
+
+    # this will remove first @ that is after schema and before domain
+    # \1 is optional schema, \2 is userinfo
+    check_url="$( sed -re 's#([^:/]*://)?([^/]+)@#\1\2#' <<< "$1" )"
+
+    if [[ "${check_url}" =~ ${regex} ]]; then
+        return 1
+    else
+        return 0
+    fi
 }
 
 CustomizeAdLists() {
-    list="/etc/pihole/adlists.list"
+    local address
+    address="${args[3]}"
+    local comment
+    comment="${args[4]}"
 
-    if [[ "${args[2]}" == "enable" ]]; then
-        sed -i "\\@${args[3]}@s/^#http/http/g" "${list}"
-    elif [[ "${args[2]}" == "disable" ]]; then
-        sed -i "\\@${args[3]}@s/^http/#http/g" "${list}"
-    elif [[ "${args[2]}" == "add" ]]; then
-        if [[ $(grep -c "^${args[3]}$" "${list}") -eq 0 ]] ; then
-            echo "${args[3]}" >> ${list}
+    if CheckUrl "${address}"; then
+        if [[ "${args[2]}" == "enable" ]]; then
+            pihole-FTL sqlite3 -ni "${gravityDBfile}" "UPDATE adlist SET enabled = 1 WHERE address = '${address}'"
+        elif [[ "${args[2]}" == "disable" ]]; then
+            pihole-FTL sqlite3 -ni "${gravityDBfile}" "UPDATE adlist SET enabled = 0 WHERE address = '${address}'"
+        elif [[ "${args[2]}" == "add" ]]; then
+            pihole-FTL sqlite3 -ni "${gravityDBfile}" "INSERT OR IGNORE INTO adlist (address, comment) VALUES ('${address}', '${comment}')"
+        elif [[ "${args[2]}" == "del" ]]; then
+            pihole-FTL sqlite3 -ni "${gravityDBfile}" "DELETE FROM adlist WHERE address = '${address}'"
+        else
+            echo "Not permitted"
+            return 1
         fi
-    elif [[ "${args[2]}" == "del" ]]; then
-        var=$(echo "${args[3]}" | sed 's/\//\\\//g')
-        sed -i "/${var}/Id" "${list}"
     else
-        echo "Not permitted"
+        echo "Invalid Url"
         return 1
-    fi
-}
-
-SetPrivacyMode() {
-    if [[ "${args[2]}" == "true" ]]; then
-        change_setting "API_PRIVACY_MODE" "true"
-    else
-        change_setting "API_PRIVACY_MODE" "false"
-    fi
-}
-
-ResolutionSettings() {
-    typ="${args[2]}"
-    state="${args[3]}"
-
-    if [[ "${typ}" == "forward" ]]; then
-        change_setting "API_GET_UPSTREAM_DNS_HOSTNAME" "${state}"
-    elif [[ "${typ}" == "clients" ]]; then
-        change_setting "API_GET_CLIENT_HOSTNAME" "${state}"
     fi
 }
 
@@ -442,54 +596,13 @@ AddDHCPStaticAddress() {
 
 RemoveDHCPStaticAddress() {
     mac="${args[2]}"
-    sed -i "/dhcp-host=${mac}.*/d" "${dhcpstaticconfig}"
-}
-
-SetHostRecord() {
-    if [[ "${1}" == "-h" ]] || [[ "${1}" == "--help" ]]; then
-        echo "Usage: pihole -a hostrecord <domain> [IPv4-address],[IPv6-address]
-Example: 'pihole -a hostrecord home.domain.com 192.168.1.1,2001:db8:a0b:12f0::1'
-Add a name to the DNS associated to an IPv4/IPv6 address
-
-Options:
-  \"\"                  Empty: Remove host record
-  -h, --help          Show this help dialog"
-        exit 0
-    fi
-
-    if [[ -n "${args[3]}" ]]; then
-        change_setting "HOSTRECORD" "${args[2]},${args[3]}"
-        echo -e "  ${TICK} Setting host record for ${args[2]} to ${args[3]}"
+    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then
+        sed -i "/dhcp-host=${mac}.*/d" "${dhcpstaticconfig}"
     else
-        change_setting "HOSTRECORD" ""
-        echo -e "  ${TICK} Removing host record"
+        echo "  ${CROSS} Invalid Mac Passed!"
+        exit 1
     fi
 
-    ProcessDNSSettings
-
-    # Restart dnsmasq to load new configuration
-    RestartDNS
-}
-
-SetAdminEmail() {
-    if [[ "${1}" == "-h" ]] || [[ "${1}" == "--help" ]]; then
-        echo "Usage: pihole -a email <address>
-Example: 'pihole -a email admin@address.com'
-Set an administrative contact address for the Block Page
-
-Options:
-  \"\"                  Empty: Remove admin contact
-  -h, --help          Show this help dialog"
-        exit 0
-    fi
-
-    if [[ -n "${args[2]}" ]]; then
-        change_setting "ADMIN_EMAIL" "${args[2]}"
-        echo -e "  ${TICK} Setting admin contact to ${args[2]}"
-    else
-        change_setting "ADMIN_EMAIL" ""
-        echo -e "  ${TICK} Removing admin contact"
-    fi
 }
 
 SetListeningMode() {
@@ -501,22 +614,26 @@ Example: 'pihole -a -i local'
 Specify dnsmasq's network interface listening behavior
 
 Interfaces:
-  local               Listen on all interfaces, but only allow queries from
-                      devices that are at most one hop away (local devices)
-  single              Listen only on ${PIHOLE_INTERFACE} interface
+  local               Only respond to queries from devices that
+                      are at most one hop away (local devices)
+  single              Respond only on interface ${PIHOLE_INTERFACE}
+  bind                Bind only on interface ${PIHOLE_INTERFACE}
   all                 Listen on all interfaces, permit all origins"
         exit 0
-  fi
+    fi
 
     if [[ "${args[2]}" == "all" ]]; then
-        echo -e "  ${INFO} Listening on all interfaces, permiting all origins. Please use a firewall!"
-        change_setting "DNSMASQ_LISTENING" "all"
+        echo -e "  ${INFO} Listening on all interfaces, permitting all origins. Please use a firewall!"
+        addOrEditKeyValPair "${setupVars}" "DNSMASQ_LISTENING" "all"
     elif [[ "${args[2]}" == "local" ]]; then
-        echo -e "  ${INFO} Listening on all interfaces, permiting origins from one hop away (LAN)"
-        change_setting "DNSMASQ_LISTENING" "local"
+        echo -e "  ${INFO} Listening on all interfaces, permitting origins from one hop away (LAN)"
+        addOrEditKeyValPair "${setupVars}" "DNSMASQ_LISTENING" "local"
+    elif [[ "${args[2]}" == "bind" ]]; then
+        echo -e "  ${INFO} Binding on interface ${PIHOLE_INTERFACE}"
+        addOrEditKeyValPair "${setupVars}" "DNSMASQ_LISTENING" "bind"
     else
         echo -e "  ${INFO} Listening only on interface ${PIHOLE_INTERFACE}"
-        change_setting "DNSMASQ_LISTENING" "single"
+        addOrEditKeyValPair "${setupVars}" "DNSMASQ_LISTENING" "single"
     fi
 
     # Don't restart DNS server yet because other settings
@@ -529,29 +646,203 @@ Interfaces:
 }
 
 Teleporter() {
-    local datetimestamp=$(date "+%Y-%m-%d_%H-%M-%S")
-    php /var/www/html/admin/scripts/pi-hole/php/teleporter.php > "pi-hole-teleporter_${datetimestamp}.zip"
+    local filename
+    filename="${args[2]}"
+    if [[ -z "${filename}" ]]; then
+        local datetimestamp
+        local host
+        datetimestamp=$(date "+%Y-%m-%d_%H-%M-%S")
+        host=$(hostname)
+        host="${host//./_}"
+        filename="pi-hole-${host:-noname}-teleporter_${datetimestamp}.tar.gz"
+    fi
+    php "${webroot}/admin/scripts/pi-hole/php/teleporter.php" > "${filename}"
+}
+
+checkDomain()
+{
+    local domain validDomain
+    # Convert to lowercase
+    domain="${1,,}"
+    validDomain=$(grep -P "^((-|_)*[a-z0-9]((-|_)*[a-z0-9])*(-|_)*)(\\.(-|_)*([a-z0-9]((-|_)*[a-z0-9])*))*$" <<< "${domain}") # Valid chars check
+    validDomain=$(grep -P "^[^\\.]{1,63}(\\.[^\\.]{1,63})*$" <<< "${validDomain}") # Length of each label
+    echo "${validDomain}"
+}
+
+escapeDots()
+{
+    # SC suggest bashism ${variable//search/replace}
+    # shellcheck disable=SC2001
+    escaped=$(echo "$1" | sed 's/\./\\./g')
+    echo "${escaped}"
 }
 
 addAudit()
 {
     shift # skip "-a"
     shift # skip "audit"
-    for var in "$@"
+    local domains validDomain
+    domains=""
+    for domain in "$@"
     do
-        echo "${var}" >> /etc/pihole/auditlog.list
+        # Check domain to be added. Only continue if it is valid
+        validDomain="$(checkDomain "${domain}")"
+        if [[ -n "${validDomain}" ]]; then
+            # Put comma in between domains when there is
+            # more than one domains to be added
+            # SQL INSERT allows adding multiple rows at once using the format
+            ## INSERT INTO table (domain) VALUES ('abc.de'),('fgh.ij'),('klm.no'),('pqr.st');
+            if [[ -n "${domains}" ]]; then
+                domains="${domains},"
+            fi
+            domains="${domains}('${domain}')"
+        fi
     done
+    # Insert only the domain here. The date_added field will be
+    # filled with its default value (date_added = current timestamp)
+    pihole-FTL sqlite3 -ni "${gravityDBfile}" "INSERT INTO domain_audit (domain) VALUES ${domains};"
 }
 
 clearAudit()
 {
-    echo -n "" > /etc/pihole/auditlog.list
+    pihole-FTL sqlite3 -ni "${gravityDBfile}" "DELETE FROM domain_audit;"
 }
 
 SetPrivacyLevel() {
-    # Set privacy level. Minimum is 0, maximum is 4
-    if [ "${args[2]}" -ge 0 ] && [ "${args[2]}" -le 4 ]; then
-        changeFTLsetting "PRIVACYLEVEL" "${args[2]}"
+    # Set privacy level. Minimum is 0, maximum is 3
+    if [ "${args[2]}" -ge 0 ] && [ "${args[2]}" -le 3 ]; then
+        addOrEditKeyValPair "${FTLconf}" "PRIVACYLEVEL" "${args[2]}"
+        pihole restartdns reload-lists
+    fi
+}
+
+AddCustomDNSAddress() {
+    echo -e "  ${TICK} Adding custom DNS entry..."
+
+    ip="${args[2]}"
+    host="${args[3]}"
+    reload="${args[4]}"
+
+    validHost="$(checkDomain "${host}")"
+    if [[ -n "${validHost}" ]]; then
+        if valid_ip "${ip}" || valid_ip6 "${ip}" ; then
+            echo "${ip} ${validHost}" >> "${dnscustomfile}"
+        else
+            echo -e "  ${CROSS} Invalid IP has been passed"
+            exit 1
+        fi
+    else
+        echo "  ${CROSS} Invalid Domain passed!"
+        exit 1
+    fi
+
+    # Restart dnsmasq to load new custom DNS entries only if $reload not false
+    if [[ ! $reload == "false" ]]; then
+        RestartDNS
+    fi
+}
+
+RemoveCustomDNSAddress() {
+    echo -e "  ${TICK} Removing custom DNS entry..."
+
+    ip="${args[2]}"
+    host="${args[3]}"
+    reload="${args[4]}"
+
+    validHost="$(checkDomain "${host}")"
+    if [[ -n "${validHost}" ]]; then
+        if valid_ip "${ip}" || valid_ip6 "${ip}" ; then
+            validHost=$(escapeDots "${validHost}")
+            sed -i "/^${ip} ${validHost}$/Id" "${dnscustomfile}"
+        else
+            echo -e "  ${CROSS} Invalid IP has been passed"
+            exit 1
+        fi
+    else
+        echo "  ${CROSS} Invalid Domain passed!"
+        exit 1
+    fi
+
+    # Restart dnsmasq to load new custom DNS entries only if reload is not false
+    if [[ ! $reload == "false" ]]; then
+        RestartDNS
+    fi
+}
+
+AddCustomCNAMERecord() {
+    echo -e "  ${TICK} Adding custom CNAME record..."
+
+    domain="${args[2]}"
+    target="${args[3]}"
+    reload="${args[4]}"
+
+    validDomain="$(checkDomain "${domain}")"
+    if [[ -n "${validDomain}" ]]; then
+        validTarget="$(checkDomain "${target}")"
+        if [[ -n "${validTarget}" ]]; then
+            if [ "${validDomain}" = "${validTarget}" ]; then
+                echo "  ${CROSS} Domain and target are the same. This would cause a DNS loop."
+                exit 1
+            else
+                echo "cname=${validDomain},${validTarget}" >> "${dnscustomcnamefile}"
+            fi
+        else
+            echo "  ${CROSS} Invalid Target Passed!"
+            exit 1
+        fi
+    else
+        echo "  ${CROSS} Invalid Domain passed!"
+        exit 1
+    fi
+    # Restart dnsmasq to load new custom CNAME records only if reload is not false
+    if [[ ! $reload == "false" ]]; then
+        RestartDNS
+    fi
+}
+
+RemoveCustomCNAMERecord() {
+    echo -e "  ${TICK} Removing custom CNAME record..."
+
+    domain="${args[2]}"
+    target="${args[3]}"
+    reload="${args[4]}"
+
+    validDomain="$(checkDomain "${domain}")"
+    if [[ -n "${validDomain}" ]]; then
+        validTarget="$(checkDomain "${target}")"
+        if [[ -n "${validTarget}" ]]; then
+            validDomain=$(escapeDots "${validDomain}")
+            validTarget=$(escapeDots "${validTarget}")
+            sed -i "/^cname=${validDomain},${validTarget}$/Id" "${dnscustomcnamefile}"
+        else
+            echo "  ${CROSS} Invalid Target Passed!"
+            exit 1
+        fi
+    else
+        echo "  ${CROSS} Invalid Domain passed!"
+        exit 1
+    fi
+
+    # Restart dnsmasq to update removed custom CNAME records only if $reload not false
+    if [[ ! $reload == "false" ]]; then
+        RestartDNS
+    fi
+}
+
+SetRateLimit() {
+    local rate_limit_count rate_limit_interval reload
+    rate_limit_count="${args[2]}"
+    rate_limit_interval="${args[3]}"
+    reload="${args[4]}"
+
+    # Set rate-limit setting inf valid
+    if [ "${rate_limit_count}" -ge 0 ] && [ "${rate_limit_interval}" -ge 0 ]; then
+        addOrEditKeyValPair "${FTLconf}" "RATE_LIMIT" "${rate_limit_count}/${rate_limit_interval}"
+    fi
+
+    # Restart FTL to update rate-limit settings only if $reload not false
+    if [[ ! $reload == "false" ]]; then
+        RestartDNS
     fi
 }
 
@@ -573,19 +864,21 @@ main() {
         "enabledhcp"          ) EnableDHCP;;
         "disabledhcp"         ) DisableDHCP;;
         "layout"              ) SetWebUILayout;;
+        "theme"               ) SetWebUITheme;;
         "-h" | "--help"       ) helpFunc;;
-        "privacymode"         ) SetPrivacyMode;;
-        "resolve"             ) ResolutionSettings;;
         "addstaticdhcp"       ) AddDHCPStaticAddress;;
         "removestaticdhcp"    ) RemoveDHCPStaticAddress;;
-        "-r" | "hostrecord"   ) SetHostRecord "$3";;
-        "-e" | "email"        ) SetAdminEmail "$3";;
         "-i" | "interface"    ) SetListeningMode "$@";;
         "-t" | "teleporter"   ) Teleporter;;
         "adlist"              ) CustomizeAdLists;;
         "audit"               ) addAudit "$@";;
         "clearaudit"          ) clearAudit;;
         "-l" | "privacylevel" ) SetPrivacyLevel;;
+        "addcustomdns"        ) AddCustomDNSAddress;;
+        "removecustomdns"     ) RemoveCustomDNSAddress;;
+        "addcustomcname"      ) AddCustomCNAMERecord;;
+        "removecustomcname"   ) RemoveCustomCNAMERecord;;
+        "ratelimit"           ) SetRateLimit;;
         *                     ) helpFunc;;
     esac
 

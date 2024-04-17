@@ -13,19 +13,23 @@ LC_NUMERIC=C
 
 # Retrieve stats from FTL engine
 pihole-FTL() {
-    ftl_port=$(cat /var/run/pihole-FTL.port 2> /dev/null)
+    local ftl_port LINE
+    # shellcheck disable=SC1091
+    . /opt/pihole/utils.sh
+    ftl_port=$(getFTLAPIPort)
     if [[ -n "$ftl_port" ]]; then
         # Open connection to FTL
         exec 3<>"/dev/tcp/127.0.0.1/$ftl_port"
 
         # Test if connection is open
         if { "true" >&3; } 2> /dev/null; then
-            # Send command to FTL
-            echo -e ">$1" >&3
+            # Send command to FTL and ask to quit when finished
+            echo -e ">$1 >quit" >&3
 
-            # Read input
+            # Read input until we received an empty string and the connection is
+            # closed
             read -r -t 1 LINE <&3
-            until [[ ! $? ]] || [[ "$LINE" == *"EOM"* ]]; do
+            until [[ -z "${LINE}" ]] && [[ ! -t 3 ]]; do
                 echo "$LINE" >&1
                 read -r -t 1 LINE <&3
             done
@@ -72,7 +76,7 @@ printFunc() {
 
     # Remove excess characters from main text
     if [[ "$text_main_len" -gt "$text_main_max_len" ]]; then
-        # Trim text without colours
+        # Trim text without colors
         text_main_trim="${text_main_nocol:0:$text_main_max_len}"
         # Replace with trimmed text
         text_main="${text_main/$text_main_nocol/$text_main_trim}"
@@ -88,7 +92,7 @@ printFunc() {
 
     [[ "$spc_num" -le 0 ]] && spc_num="0"
     spc=$(printf "%${spc_num}s")
-    #spc="${spc// /.}" # Debug: Visualise spaces
+    #spc="${spc// /.}" # Debug: Visualize spaces
 
     printf "%s%s$spc" "$title" "$text_main"
 
@@ -131,7 +135,7 @@ get_init_stats() {
         printf "%s%02d:%02d:%02d\\n" "$days" "$hrs" "$mins" "$secs"
     }
 
-    # Set Colour Codes
+    # Set Color Codes
     coltable="/opt/pihole/COL_TABLE"
     if [[ -f "${coltable}" ]]; then
         source ${coltable}
@@ -153,7 +157,7 @@ get_init_stats() {
 
         sys_throttle_raw=$(vgt=$(sudo vcgencmd get_throttled); echo "${vgt##*x}")
 
-        # Active Throttle Notice: http://bit.ly/2gnunOo
+        # Active Throttle Notice: https://bit.ly/2gnunOo
         if [[ "$sys_throttle_raw" != "0" ]]; then
             case "$sys_throttle_raw" in
                 *0001) thr_type="${COL_YELLOW}Under Voltage";;
@@ -228,15 +232,21 @@ get_sys_stats() {
         mapfile -t ph_ver_raw < <(pihole -v -c 2> /dev/null | sed -n 's/^.* v/v/p')
         if [[ -n "${ph_ver_raw[0]}" ]]; then
             ph_core_ver="${ph_ver_raw[0]}"
-            ph_lte_ver="${ph_ver_raw[1]}"
-            ph_ftl_ver="${ph_ver_raw[2]}"
+            if [[ ${#ph_ver_raw[@]} -eq 2 ]]; then
+                # web not installed
+                ph_lte_ver="(not installed)"
+                ph_ftl_ver="${ph_ver_raw[1]}"
+            else
+                ph_lte_ver="${ph_ver_raw[1]}"
+                ph_ftl_ver="${ph_ver_raw[2]}"
+            fi
         else
             ph_core_ver="-1"
         fi
 
         sys_name=$(hostname)
 
-        [[ -n "$TEMPERATUREUNIT" ]] && temp_unit="$TEMPERATUREUNIT" || temp_unit="c"
+        [[ -n "$TEMPERATUREUNIT" ]] && temp_unit="${TEMPERATUREUNIT^^}" || temp_unit="C"
 
         # Get storage stats for partition mounted on /
         read -r -a disk_raw <<< "$(df -B1 / 2> /dev/null | awk 'END{ print $3,$2,$5 }')"
@@ -269,7 +279,7 @@ get_sys_stats() {
     scr_lines="${scr_size[0]}"
     scr_cols="${scr_size[1]}"
 
-    # Determine Chronometer size behaviour
+    # Determine Chronometer size behavior
     if [[ "$scr_cols" -ge 58 ]]; then
         chrono_width="large"
     elif [[ "$scr_cols" -gt 40 ]]; then
@@ -308,7 +318,7 @@ get_sys_stats() {
         [[ "${cpu_freq}" == *".0"* ]] && cpu_freq="${cpu_freq/.0/}"
     fi
 
-    # Determine colour for temperature
+    # Determine color for temperature
     if [[ -n "$temp_file" ]]; then
         if [[ "$temp_unit" == "C" ]]; then
             cpu_temp=$(printf "%.0fc\\n" "$(calcFunc "$(< $temp_file) / 1000")")
@@ -321,8 +331,8 @@ get_sys_stats() {
                 *) cpu_col="$COL_URG_RED";;
             esac
 
-        # $COL_NC$COL_DARK_GRAY is needed for $COL_URG_RED
-        cpu_temp_str=" @ $cpu_col$cpu_temp$COL_NC$COL_DARK_GRAY"
+            # $COL_NC$COL_DARK_GRAY is needed for $COL_URG_RED
+            cpu_temp_str=" @ $cpu_col$cpu_temp$COL_NC$COL_DARK_GRAY"
 
         elif [[ "$temp_unit" == "F" ]]; then
             cpu_temp=$(printf "%.0ff\\n" "$(calcFunc "($(< $temp_file) / 1000) * 9 / 5 + 32")")
@@ -349,7 +359,7 @@ get_sys_stats() {
     ram_used="${ram_raw[1]}"
     ram_total="${ram_raw[2]}"
 
-    if [[ "$(pihole status web 2> /dev/null)" == "1" ]]; then
+    if [[ "$(pihole status web 2> /dev/null)" -ge "1" ]]; then
         ph_status="${COL_LIGHT_GREEN}Active"
     else
         ph_status="${COL_LIGHT_RED}Offline"
@@ -437,13 +447,16 @@ get_strings() {
     lan_info="Gateway: $net_gateway"
     dhcp_info="$leased_str$ph_dhcp_num of $ph_dhcp_max"
 
-      ads_info="$total_str$ads_blocked_today of $dns_queries_today"
+    ads_info="$total_str$ads_blocked_today of $dns_queries_today"
     dns_info="$dns_count DNS servers"
 
     [[ "$recent_blocked" == "0" ]] && recent_blocked="${COL_LIGHT_RED}FTL offline${COL_NC}"
 }
 
 chronoFunc() {
+    local extra_arg="$1"
+    local extra_value="$2"
+
     get_init_stats
 
     for (( ; ; )); do
@@ -461,10 +474,8 @@ chronoFunc() {
         fi
 
         # Get refresh number
-        if [[ "$*" == *"-r"* ]]; then
-            num="$*"
-            num="${num/*-r /}"
-            num="${num/ */}"
+        if [[ "${extra_arg}" = "refresh" ]]; then
+            num="${extra_value}"
             num_str="Refresh set for every $num seconds"
         else
             num_str=""
@@ -473,13 +484,13 @@ chronoFunc() {
         clear
 
         # Remove exit message heading on third refresh
-        if [[ "$count" -le 2 ]] && [[ "$*" != *"-e"* ]]; then
+        if [[ "$count" -le 2 ]] && [[ "${extra_arg}" != "exit" ]]; then
             echo -e " ${COL_LIGHT_GREEN}Pi-hole Chronometer${COL_NC}
             $num_str
             ${COL_LIGHT_RED}Press Ctrl-C to exit${COL_NC}
             ${COL_DARK_GRAY}$scr_line_str${COL_NC}"
         else
-        echo -e "[0;1;31;91m|¯[0;1;33;93m¯[0;1;32;92m¯[0;1;32;92m(¯[0;1;36;96m)[0;1;34;94m_[0;1;35;95m|[0;1;33;93m¯[0;1;31;91m|_  [0;1;32;92m__[0;1;36;96m_|[0;1;31;91m¯[0;1;34;94m|[0;1;35;95m__[0;1;31;91m_[0m$phc_ver_str\\n[0;1;33;93m| ¯[0;1;32;92m_[0;1;36;96m/¯[0;1;34;94m|[0;1;35;95m_[0;1;31;91m| [0;1;33;93m' [0;1;32;92m\\/ [0;1;36;96m_ [0;1;34;94m\\ [0;1;35;95m/ [0;1;31;91m-[0;1;33;93m_)[0m$lte_ver_str\\n[0;1;32;92m|_[0;1;36;96m| [0;1;34;94m|_[0;1;35;95m| [0;1;33;93m|_[0;1;32;92m||[0;1;36;96m_\\[0;1;34;94m__[0;1;35;95m_/[0;1;31;91m_\\[0;1;33;93m__[0;1;32;92m_|[0m$ftl_ver_str\\n ${COL_DARK_GRAY}$scr_line_str${COL_NC}"
+            echo -e "[0;1;31;91m|¯[0;1;33;93m¯[0;1;32;92m¯[0;1;32;92m(¯[0;1;36;96m)[0;1;34;94m_[0;1;35;95m|[0;1;33;93m¯[0;1;31;91m|_  [0;1;32;92m__[0;1;36;96m_|[0;1;31;91m¯[0;1;34;94m|[0;1;35;95m__[0;1;31;91m_[0m$phc_ver_str\\n[0;1;33;93m| ¯[0;1;32;92m_[0;1;36;96m/¯[0;1;34;94m|[0;1;35;95m_[0;1;31;91m| [0;1;33;93m' [0;1;32;92m\\/ [0;1;36;96m_ [0;1;34;94m\\ [0;1;35;95m/ [0;1;31;91m-[0;1;33;93m_)[0m$lte_ver_str\\n[0;1;32;92m|_[0;1;36;96m| [0;1;34;94m|_[0;1;35;95m| [0;1;33;93m|_[0;1;32;92m||[0;1;36;96m_\\[0;1;34;94m__[0;1;35;95m_/[0;1;31;91m_\\[0;1;33;93m__[0;1;32;92m_|[0m$ftl_ver_str\\n ${COL_DARK_GRAY}$scr_line_str${COL_NC}"
         fi
 
         printFunc "  Hostname: " "$sys_name" "$host_info"
@@ -489,20 +500,16 @@ chronoFunc() {
         printFunc " RAM usage: " "$ram_perc%" "$ram_info"
         printFunc " HDD usage: " "$disk_perc" "$disk_info"
 
-        if [[ "$scr_lines" -gt 17 ]] && [[ "$chrono_width" != "small" ]]; then
-            printFunc "  LAN addr: " "${IPV4_ADDRESS/\/*/}" "$lan_info"
-        fi
-
         if [[ "$DHCP_ACTIVE" == "true" ]]; then
             printFunc "DHCP usage: " "$ph_dhcp_percent%" "$dhcp_info"
         fi
 
         printFunc "   Pi-hole: " "$ph_status" "$ph_info"
-        printFunc " Ads Today: " "$ads_percentage_today%" "$ads_info"
+        printFunc "   Blocked: " "$ads_percentage_today%" "$ads_info"
         printFunc "Local Qrys: " "$queries_cached_percentage%" "$dns_info"
 
-        printFunc "   Blocked: " "$recent_blocked"
-        printFunc "Top Advert: " "$top_ad"
+        printFunc "Last Block: " "$recent_blocked"
+        printFunc " Top Block: " "$top_ad"
 
         # Provide more stats on screens with more lines
         if [[ "$scr_lines" -eq 17 ]]; then
@@ -521,10 +528,10 @@ chronoFunc() {
         fi
 
         # Handle exit/refresh options
-        if [[ "$*" == *"-e"* ]]; then
+        if [[ "${extra_arg}" == "exit" ]]; then
             exit 0
         else
-            if [[ "$*" == *"-r"* ]]; then
+            if [[ "${extra_arg}" == "refresh" ]]; then
                 sleep "$num"
             else
                 sleep 5
@@ -550,7 +557,7 @@ Calculates stats and displays to an LCD
 Options:
   -j, --json          Output stats as JSON formatted string
   -r, --refresh       Set update frequency (in seconds)
-  -e, --exit          Output stats and exit witout refreshing
+  -e, --exit          Output stats and exit without refreshing
   -h, --help          Display this help text"
   fi
 
@@ -561,12 +568,10 @@ if [[ $# = 0 ]]; then
     chronoFunc
 fi
 
-for var in "$@"; do
-    case "$var" in
-        "-j" | "--json"    ) jsonFunc;;
-        "-h" | "--help"    ) helpFunc;;
-        "-r" | "--refresh" ) chronoFunc "$@";;
-        "-e" | "--exit"    ) chronoFunc "$@";;
-        *                  ) helpFunc "?";;
-    esac
-done
+case "$1" in
+    "-j" | "--json"    ) jsonFunc;;
+    "-h" | "--help"    ) helpFunc;;
+    "-r" | "--refresh" ) chronoFunc refresh "$2";;
+    "-e" | "--exit"    ) chronoFunc exit;;
+    *                  ) helpFunc "?";;
+esac

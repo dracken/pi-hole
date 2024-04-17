@@ -1,4 +1,4 @@
-.TH "Pi-hole" "8" "Pi-hole" "Pi-hole" "May 2018"
+.TH "Pi-hole" "8" "Pi-hole" "Pi-hole" "April 2020"
 .SH "NAME"
 
 Pi-hole : A black-hole for internet advertisements
@@ -10,10 +10,6 @@ Pi-hole : A black-hole for internet advertisements
 \fBpihole -a\fR \fB-p\fR password
 .br
 \fBpihole -a\fR (\fB-c|-f|-k\fR)
-.br
-\fBpihole -a\fR [\fB-r\fR hostrecord]
-.br
-\fBpihole -a -e\fR email
 .br
 \fBpihole -a -i\fR interface
 .br
@@ -27,7 +23,7 @@ Pi-hole : A black-hole for internet advertisements
 .br
 pihole -r
 .br
-pihole -t
+\fBpihole\fR \fB-t\fR [arg]
 .br
 pihole -g\fR
 .br
@@ -35,7 +31,7 @@ pihole -g\fR
 .br
 \fBpihole\fR \fB-l\fR (\fBon|off|off noflush\fR)
 .br
-\fBpihole -up \fR[--checkonly]
+\fBpihole -up \fR[--check-only]
 .br
 \fBpihole -v\fR [-p|-a|-f] [-c|-l|-hash]
 .br
@@ -43,7 +39,7 @@ pihole -g\fR
 .br
 pihole status
 .br
-pihole restartdns\fR
+pihole restartdns\fR [options]
 .br
 \fBpihole\fR (\fBenable\fR|\fBdisable\fR [time])
 .br
@@ -58,7 +54,7 @@ Available commands and options:
 
 \fB-w, whitelist\fR [options] [<domain1> <domain2 ...>]
 .br
-    Adds or removes specified domain or domains tho the Whitelist
+    Adds or removes specified domain or domains to the Whitelist
 .br
 
 \fB-b, blacklist\fR [options] [<domain1> <domain2 ...>]
@@ -66,14 +62,24 @@ Available commands and options:
     Adds or removes specified domain or domains to the blacklist
 .br
 
+\fB--regex, regex\fR [options] [<regex1> <regex2 ...>]
+.br
+    Add or removes specified regex filter to the regex blacklist
+.br
+
+\fB--white-regex\fR [options] [<regex1> <regex2 ...>]
+.br
+    Add or removes specified regex filter to the regex whitelist
+.br
+
 \fB--wild, wildcard\fR [options] [<domain1> <domain2 ...>]
 .br
     Add or removes specified domain to the wildcard blacklist
 .br
 
-\fB--regex, regex\fR [options] [<regex1> <regex2 ...>]
+\fB--white-wild\fR [options] [<domain1> <domain2 ...>]
 .br
-    Add or removes specified regex filter to the regex blacklist
+    Add or removes specified domain to the wildcard whitelist
 .br
 
     (Whitelist/Blacklist manipulation options):
@@ -107,9 +113,13 @@ Available commands and options:
     Reconfigure or Repair Pi-hole subsystems
 .br
 
-\fB-t, tail\fR
+\fB-t, tail\fR [arg]
 .br
     View the live output of the Pi-hole log
+.br
+
+      [arg]             Optional argument to filter the log for
+                        (regular expressions are supported)
 .br
 
 \fB-a, admin\fR [options]
@@ -125,16 +135,10 @@ Available commands and options:
 .br
       -k, kelvin        Set Kelvin as preferred temperature unit
 .br
-      -r, hostrecord    Add a name to the DNS associated to an
-                        IPv4/IPv6 address
-.br
-      -e, email         Set an administrative contact address for the
-                        Block Page
-.br
       -i, interface     Specify dnsmasq's interface listening behavior
 .br
       -l, privacylevel  <level> Set privacy level
-                        (0 = lowest, 4 = highest)
+                        (0 = lowest, 3 = highest)
 .br
 
 \fB-c, chronometer\fR	[options]
@@ -148,7 +152,7 @@ Available commands and options:
 .br
       -r, --refresh     Set update frequency (in seconds)
 .br
-      -e, --exit        Output stats and exit witout refreshing
+      -e, --exit        Output stats and exit without refreshing
 .br
 
 \fB-g, updateGravity\fR
@@ -182,12 +186,12 @@ Available commands and options:
 
 	(Logging options):
 .br
-      on                Enable the Pi-hole log at /var/log/pihole.log
+      on                Enable the Pi-hole log at /var/log/pihole/pihole.log
 .br
       off               Disable and flush the Pi-hole log at
-                        /var/log/pihole.log
+                        /var/log/pihole/pihole.log
 .br
-      off noflush       Disable the Pi-hole log at /var/log/pihole.log
+      off noflush       Disable the Pi-hole log at /var/log/pihole/pihole.log
 .br
 
 \fB-up, updatePihole\fR [--check-only]
@@ -208,7 +212,7 @@ Available commands and options:
 .br
       -p, --pihole      Only retrieve info regarding Pi-hole repository
 .br
-      -a, --admin       Only retrieve info regarding AdminLTE
+      -a, --admin       Only retrieve info regarding web
                         repository
 .br
       -f, --ftl         Only retrieve info regarding FTL repository
@@ -219,7 +223,7 @@ Available commands and options:
 .br
       -l, --latest      Return the latest version
 .br
-      --hash            Return the Github hash from your local
+      --hash            Return the GitHub hash from your local
                         repositories
 .br
 
@@ -250,14 +254,21 @@ Available commands and options:
       #m                Disable Pi-hole functionality for # minute(s)
 .br
 
-\fBrestartdns\fR
+\fBrestartdns\fR [options]
 .br
-    Restart Pi-hole subsystems
+    Full restart Pi-hole subsystems. Without any options (see below) a full restart causes config file parsing and history re-reading
+.br
+
+    (restart options):
+.br
+      reload            Updates the lists (incl. HOSTS files) and flushes DNS cache. Does not reparse config files
+.br
+      reload-lists      Updates the lists (excl. HOSTS files) WITHOUT flushing the DNS cache. Does not reparse config files
 .br
 
 \fBcheckout\fR [repo] [branch]
 .br
-    Switch Pi-hole subsystems to a different Github branch
+    Switch Pi-hole subsystems to a different GitHub branch
 .br
 
     (repo options):
@@ -328,7 +339,7 @@ Displaying version information
 
 \fBpihole -v -a -c\fR
 .br
-    Display the current version of AdminLTE
+    Display the current version of web
 .br
 
 Temporarily disabling Pi-hole
@@ -351,6 +362,12 @@ Switching Pi-hole subsystem branches
 .br
     Switch to core development branch
 .br
+
+\fBpihole arpflush\fR
+.br
+    Flush information stored in Pi-hole's network tables
+.br
+
 .SH "SEE ALSO"
 
 \fBlighttpd\fR(8), \fBpihole-FTL\fR(8)
